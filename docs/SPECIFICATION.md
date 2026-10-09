@@ -86,7 +86,7 @@ rendering of model/3D files, batch editing, ratings.
 | C24 | Open folder | Reveals a folder in the OS file explorer (only footer action; no path text) | Details panel |
 | C25 | Automatic store enrichment | New assets are looked up in the Unity Asset Store automatically: description saved, tags derived; manual descriptions never overwritten | Main process |
 | C26 | Tag suggestions | Tag editor suggests existing tags in the app while typing | Details panel |
-| C27 | Import file list | "Import files" lists only `.unitypackage` filenames | Details panel |
+| C27 | Import file list | "Import files" lists `.unitypackage` and `.zip` filenames | Details panel |
 
 ## 4. Library concept & scanning rules
 
@@ -99,6 +99,10 @@ A folder is an **asset** iff it directly contains:
 Pure folder-folder structures are **containers**. The preview image itself is
 never counted as an importable — a folder with *only* a preview is browse-only
 (`importable: false`, no Import button).
+
+Each `.unitypackage` and `.zip` file is its own asset, even when several
+archives share a folder. Unitypackage `.icon.png` entries supply the card
+thumbnail; nested `preview.png` entries appear in the asset detail gallery.
 
 ### 4.2 Previews
 
@@ -117,6 +121,7 @@ bridge response stays `no-store` — only previews are cacheable.
 | Kind | Extensions |
 | --- | --- |
 | unitypackage | `.unitypackage` |
+| zip | `.zip` |
 | scene / prefab | `.prefab`, `.scene` |
 | mesh | `.fbx .obj .glb .gltf .blend .dae .3ds .dxf .stl .max .c4d .mb .ma .abc .x .lwo .lws .ply` |
 | texture | `.png .jpg .jpeg .tga .psd .tif .tiff .bmp .gif .exr .hdr .dds .ktx .pvr` |

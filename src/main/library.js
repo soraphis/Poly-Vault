@@ -14,7 +14,7 @@ const PREVIEW_PRIORITY = ['.png', '.jpg', '.jpeg', '.webp'];
 // one of these, the "Import to Unity" action becomes available.
 const IMPORTABLE_EXTENSIONS = new Set([
   // packages / scene / prefab artifacts
-  '.unitypackage',
+  '.unitypackage', '.zip',
   '.prefab', '.scene',
   // meshes & models
   '.fbx', '.obj', '.glb', '.gltf', '.blend', '.dae', '.3ds', '.dxf', '.stl',
@@ -156,6 +156,61 @@ function findPreviewImage(assetDir, files) {
   return best;
 }
 
+function isArchiveFile(file) {
+  const ext = path.extname(file.name).toLowerCase();
+  return ext === '.unitypackage' || ext === '.zip';
+}
+
+function createAssetNode(lib, name, absPath, rel, files, preview, getTags, getMeta) {
+  const importables = classifyImportable(absPath, files, preview && preview.path);
+  const tags = getTags ? (Array.isArray(getTags(absPath)) ? getTags(absPath) : []) : [];
+  const info = statInfo(absPath);
+  const sizeBytes = sizeOfDir(files);
+  const fileCount = files.length;
+  const archiveFiles = importables.filter((item) => item.kind === 'unitypackage' || item.kind === 'zip');
+  const archivePreview = preview && preview.archive;
+
+  return {
+    type: 'asset',
+    name,
+    path: absPath,
+    rel,
+    count: 1,
+    assetCount: 1,
+    fileCount,
+    sizeBytes,
+    kindCounts: buildKindCounts(importables),
+    tags,
+    created: info.created,
+    updated: info.updated,
+    description: getMeta ? getMeta(absPath) || '' : '',
+    children: [],
+    asset: {
+      id: `${lib.id}:${hashString(absPath)}`,
+      name,
+      relPath: rel,
+      category: rel,
+      libraryId: lib.id,
+      libraryName: lib.name,
+      folder: absPath,
+      location: isDir(absPath) ? absPath : path.dirname(absPath),
+      sizeBytes,
+      fileCount,
+      kindCounts: buildKindCounts(importables),
+      preview: preview ? { path: preview.path, rel: preview.rel, archive: !!archivePreview } : null,
+      archives: archiveFiles,
+      importables,
+      importable: importables.length > 0,
+      kinds: assetDisplayKinds(importables),
+      kind: assetKind(importables),
+      tags,
+      created: info.created,
+      updated: info.updated,
+      description: getMeta ? getMeta(absPath) || '' : '',
+    },
+  };
+}
+
 function classifyImportable(assetDir, files, excludePath = null) {
   const importables = [];
   for (const f of files) {
@@ -175,6 +230,7 @@ function classifyImportable(assetDir, files, excludePath = null) {
 
 function assetKind(importables) {
   if (importables.some((i) => i.kind === 'unitypackage')) return 'unitypackage';
+  if (importables.some((i) => i.kind === 'zip')) return 'zip';
   for (const i of importables) {
     if (MESH_EXTENSIONS.has(`.${i.kind}`)) return 'mesh';
   }
@@ -294,6 +350,55 @@ function scanDirectory(lib, absPath, rel, depth, getTags, getMeta) {
     }
   }
 
+  const directArchives = directFiles.filter(isArchiveFile);
+  if (directArchives.length) {
+    const children = directArchives.map((file) => {
+      const fileRel = rel ? `${rel}/${file.name}` : file.name;
+      const item = { ...file, rel: file.name };
+      const ext = path.extname(file.name).toLowerCase();
+      const displayName = path.basename(file.name, ext);
+      return createAssetNode(lib, displayName, file.path, fileRel, [item], {
+        path: file.path, rel: file.name, archive: true,
+      }, getTags, getMeta);
+    });
+
+    const otherFiles = directFiles.filter((file) => !isArchiveFile(file));
+    if (otherFiles.length) {
+      const preview = findPreviewImage(absPath, otherFiles);
+      const folderRel = rel ? `${rel}/files` : 'files';
+      children.push(createAssetNode(
+        lib, `${name} files`, absPath, folderRel, otherFiles, preview, getTags, getMeta
+      ));
+    }
+
+    for (const dir of dirs) {
+      const childName = path.basename(dir);
+      const childRel = rel ? `${rel}/${childName}` : childName;
+      const childNode = scanDirectory(lib, dir, childRel, depth + 1, getTags, getMeta);
+      if (childNode) children.push(childNode);
+    }
+
+    const agg = aggregateChildren(children);
+    const info = statInfo(absPath);
+    return {
+      type: 'container',
+      name,
+      path: absPath,
+      rel,
+      count: agg.assetCount,
+      assetCount: agg.assetCount,
+      fileCount: agg.fileCount,
+      sizeBytes: agg.sizeBytes,
+      kindCounts: agg.kindCounts,
+      tags: agg.tags,
+      created: info.created,
+      updated: maxUpdated(children, info.updated),
+      description: getMeta ? getMeta(absPath) || '' : '',
+      children,
+      asset: null,
+    };
+  }
+
   const hasDirectPreview = directFiles.some(
     (f) => PREVIEW_PRIORITY.indexOf(path.extname(f.name).toLowerCase()) !== -1
   );
@@ -307,49 +412,7 @@ function scanDirectory(lib, absPath, rel, depth, getTags, getMeta) {
   if (hasDirectPreview || hasDirectImportable) {
     const files = listFilesRecursive(absPath);
     const preview = findPreviewImage(absPath, files);
-    // The preview image doubles as display only; never count it as an
-    // importable file.
-    const importables = classifyImportable(absPath, files, preview && preview.path);
-    const tags = getTags ? (Array.isArray(getTags(absPath)) ? getTags(absPath) : []) : [];
-    const info = statInfo(absPath);
-
-    return {
-      type: 'asset',
-      name,
-      path: absPath,
-      rel,
-      count: 1,
-      assetCount: 1,
-      fileCount: files.length,
-      sizeBytes: sizeOfDir(files),
-      kindCounts: buildKindCounts(importables),
-      tags,
-      created: info.created,
-      updated: info.updated,
-      description: getMeta ? getMeta(absPath) || '' : '',
-      children: [],
-      asset: {
-        id: `${lib.id}:${hashString(absPath)}`,
-        name,
-        relPath: rel,
-        category: rel, // parent relative path; replaced with parent rel by flatten
-        libraryId: lib.id,
-        libraryName: lib.name,
-        folder: absPath,
-        sizeBytes: sizeOfDir(files),
-        fileCount: files.length,
-        kindCounts: buildKindCounts(importables),
-        preview: preview ? { path: preview.path, rel: preview.rel } : null,
-        importables,
-        importable: importables.length > 0,
-        kinds: assetDisplayKinds(importables),
-        kind: assetKind(importables),
-        tags,
-        created: info.created,
-        updated: info.updated,
-        description: getMeta ? getMeta(absPath) || '' : '',
-      },
-    };
+    return createAssetNode(lib, name, absPath, rel, files, preview, getTags, getMeta);
   }
 
   const children = [];

@@ -6,8 +6,10 @@ const path = require('path');
 const crypto = require('crypto');
 
 const { scanLibrary } = require('./library');
+const { getArchiveImages } = require('./archivePreviews');
 
 const ALLOWED_PREVIEW_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+const ARCHIVE_EXT = new Set(['.unitypackage', '.zip']);
 const PREVIEW_CACHE_CONTROL = 'private, max-age=3600';
 const MIME = {
   '.png': 'image/png',
@@ -315,7 +317,8 @@ function startBridge({ host = '127.0.0.1', port = 7100, getState, tags, meta, on
           return;
         }
         const ext = path.extname(target).toLowerCase();
-        if (!ALLOWED_PREVIEW_EXT.has(ext)) {
+        const isArchive = ARCHIVE_EXT.has(ext);
+        if (!isArchive && !ALLOWED_PREVIEW_EXT.has(ext)) {
           sendJson(res, 400, { ok: false, error: 'forbidden extension' });
           return;
         }
@@ -328,6 +331,38 @@ function startBridge({ host = '127.0.0.1', port = 7100, getState, tags, meta, on
           stat = fs.statSync(target);
         } catch (_) {
           sendJson(res, 404, { ok: false, error: 'not found' });
+          return;
+        }
+        if (isArchive) {
+          let images;
+          try {
+            images = await getArchiveImages(target);
+          } catch (_) {
+            sendJson(res, 404, { ok: false, error: 'archive preview not found' });
+            return;
+          }
+          const requestedEntry = url.searchParams.get('entry');
+          const image = requestedEntry
+            ? images.find((item) => item.entry === requestedEntry)
+            : images.find((item) => item.role === 'icon') || images[0];
+          if (!image) {
+            sendJson(res, 404, { ok: false, error: 'archive preview not found' });
+            return;
+          }
+          const etag = `W/"${stat.size.toString(16)}-${Math.trunc(stat.mtimeMs).toString(16)}-${crypto.createHash('sha1').update(image.entry).digest('hex').slice(0, 8)}"`;
+          const base = {
+            'Content-Type': MIME['.png'],
+            'Cache-Control': PREVIEW_CACHE_CONTROL,
+            ETag: etag,
+            'Last-Modified': new Date(stat.mtimeMs).toUTCString(),
+          };
+          if (req.headers['if-none-match'] === etag) {
+            res.writeHead(304, base);
+            res.end();
+            return;
+          }
+          res.writeHead(200, { ...base, 'Content-Length': image.data.length });
+          res.end(image.data);
           return;
         }
         const etag = `W/"${stat.size.toString(16)}-${Math.trunc(stat.mtimeMs).toString(16)}"`;
@@ -348,6 +383,29 @@ function startBridge({ host = '127.0.0.1', port = 7100, getState, tags, meta, on
         }
         res.writeHead(200, { ...base, 'Content-Length': stat.size });
         fs.createReadStream(target).pipe(res);
+        return;
+      }
+
+      if (req.method === 'GET' && route === '/api/archive-previews') {
+        const target = url.searchParams.get('path');
+        if (!target || !ARCHIVE_EXT.has(path.extname(target).toLowerCase())) {
+          sendJson(res, 400, { ok: false, error: 'missing or unsupported archive path' });
+          return;
+        }
+        if (!withinLibrary(target, libs)) {
+          sendJson(res, 403, { ok: false, error: 'path outside libraries' });
+          return;
+        }
+        try {
+          const images = await getArchiveImages(target);
+          sendJson(res, 200, {
+            ok: true,
+            entries: images.filter((image) => image.role === 'preview')
+              .map(({ entry, role }) => ({ entry, role })),
+          });
+        } catch (_) {
+          sendJson(res, 200, { ok: true, entries: [] });
+        }
         return;
       }
 

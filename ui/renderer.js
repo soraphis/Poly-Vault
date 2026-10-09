@@ -711,8 +711,12 @@ function initTagPopover() {
 
 // ---------- grid ----------
 
-function previewUrl(path) {
-  return path ? `${state.serverUrl}/api/preview?path=${encodeURIComponent(path)}` : null;
+function previewUrl(preview, entry) {
+  const target = typeof preview === 'string' ? preview : preview && preview.path;
+  if (!target) return null;
+  const params = new URLSearchParams({ path: target });
+  if (entry) params.set('entry', entry);
+  return `${state.serverUrl}/api/preview?${params.toString()}`;
 }
 
 function jobForAsset(asset) {
@@ -738,7 +742,7 @@ function renderGrid() {
     const card = el('div', 'card' + (a.id === state.selectedAssetId ? ' selected' : ''));
     card.style.animationDelay = `${Math.min((i % 12) * 16, 180)}ms`;
     const thumb = el('div', 'thumb');
-    const url = previewUrl(a.preview && a.preview.path);
+    const url = previewUrl(a.preview);
     if (url) {
       const img = el('img');
       img.src = url;
@@ -1121,17 +1125,20 @@ function pathFooter(p) {
 }
 
 function renderAssetDetail(content, asset) {
-  const url = previewUrl(asset.preview && asset.preview.path);
+  const url = previewUrl(asset.preview);
   if (url) {
     const box = el('div', 'preview');
     const img = el('img');
     img.src = url;
     img.draggable = false;
+    img.addEventListener('error', () => box.replaceWith(el('div', 'preview no-image', asset.name[0].toUpperCase())));
     box.appendChild(img);
     content.appendChild(box);
   } else {
     content.appendChild(el('div', 'preview no-image', asset.name[0].toUpperCase()));
   }
+
+  loadArchivePreviews(content, asset);
 
   content.appendChild(el('h2', '', asset.name));
   content.appendChild(el('div', 'sub', `${asset.category || asset.relPath} \u00B7 ${asset.fileCount} files \u00B7 ${fmtBytes(asset.sizeBytes)}`));
@@ -1178,11 +1185,13 @@ function renderAssetDetail(content, asset) {
     content.appendChild(js);
   }
 
-  const pkgs = (asset.importables || []).filter((f) => (f.kind || '').toLowerCase() === 'unitypackage');
-  if (pkgs.length) {
+  const archives = (asset.importables || []).filter((file) =>
+    ['unitypackage', 'zip'].includes((file.kind || '').toLowerCase())
+  );
+  if (archives.length) {
     content.appendChild(el('div', 'detail-section-title', 'Import files'));
     const list = el('ul', 'file-list');
-    for (const f of pkgs) list.appendChild(el('li', 'importable-file', f.name));
+    for (const file of archives) list.appendChild(el('li', 'importable-file', file.name));
     content.appendChild(list);
   }
 
@@ -1196,7 +1205,41 @@ function renderAssetDetail(content, asset) {
 
   content.appendChild(buildDescriptionEditor(asset.folder));
 
-  content.appendChild(pathFooter(asset.folder));
+  content.appendChild(pathFooter(asset.location || asset.folder));
+}
+
+async function loadArchivePreviews(content, asset) {
+  const archives = asset.archives || [];
+  if (!archives.length) return;
+  const groups = await Promise.all(archives.map(async (archive) => {
+    try {
+      const params = new URLSearchParams({ path: archive.path });
+      const response = await fetch(`${state.serverUrl}/api/archive-previews?${params.toString()}`);
+      const result = await response.json();
+      return (result.entries || []).map((entry) => ({ archive, entry }));
+    } catch (_) {
+      return [];
+    }
+  }));
+  const previews = groups.flat();
+  if (!previews.length || !content.isConnected) return;
+
+  const gallery = el('div', 'archive-preview-gallery');
+  gallery.appendChild(el('div', 'detail-section-title', 'Package previews'));
+  const grid = el('div', 'archive-preview-grid');
+  for (const { archive, entry } of previews) {
+    const item = el('div', 'archive-preview-item');
+    const image = el('img');
+    image.src = previewUrl(archive.path, entry.entry);
+    image.alt = entry.entry;
+    image.loading = 'lazy';
+    image.addEventListener('error', () => item.remove());
+    item.appendChild(image);
+    item.appendChild(el('div', 'archive-preview-caption', entry.entry));
+    grid.appendChild(item);
+  }
+  gallery.appendChild(grid);
+  content.insertBefore(gallery, content.children[1] || null);
 }
 
 function renderContainerDetail(content, { node, scan }) {

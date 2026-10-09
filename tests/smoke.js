@@ -3,6 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 const assert = require('assert');
 
 const { scanLibrary } = require('../src/main/library');
@@ -18,6 +19,79 @@ function write(rel, content) {
   fs.writeFileSync(p, content);
 }
 
+const crcTable = Array.from({ length: 256 }, (_, value) => {
+  let crc = value;
+  for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) ? (0xedb88320 ^ (crc >>> 1)) : (crc >>> 1);
+  return crc >>> 0;
+});
+
+function crc32(data) {
+  let crc = 0xffffffff;
+  for (const byte of data) crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zipFile(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let localOffset = 0;
+  for (const [name, data] of entries) {
+    const nameBytes = Buffer.from(name);
+    const checksum = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    localParts.push(local, nameBytes, data);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt32LE(localOffset, 42);
+    centralParts.push(central, nameBytes);
+    localOffset += local.length + nameBytes.length + data.length;
+  }
+
+  const centralData = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralData.length, 12);
+  end.writeUInt32LE(localOffset, 16);
+  return Buffer.concat([...localParts, centralData, end]);
+}
+
+function unityPackageFile(entries) {
+  const parts = [];
+  for (const [name, data] of entries) {
+    const header = Buffer.alloc(512);
+    header.write(name, 0, 100, 'utf8');
+    header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124, 12, 'ascii');
+    header[156] = 48;
+    header.write('ustar\0', 257, 6, 'ascii');
+    header.write('00', 263, 2, 'ascii');
+    header.fill(32, 148, 156);
+    let checksum = 0;
+    for (const byte of header) checksum += byte;
+    header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii');
+    const padding = Buffer.alloc((512 - (data.length % 512)) % 512);
+    parts.push(header, data, padding);
+  }
+  parts.push(Buffer.alloc(1024));
+  return zlib.gzipSync(Buffer.concat(parts));
+}
+
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+
 // Nested fixture:
 //   MyAssets
 //     3d
@@ -29,7 +103,8 @@ function write(rel, content) {
 //         Car       -> preview.webp only         (not importable)
 //     2d
 //       GrassTex    -> preview.jpg + grass.png   (texture, importable)
-//       Pack        -> preview.gif + sheet.unitypackage (unitypackage)
+//       Pack        -> preview.gif + two separate unitypackage assets
+//       ZipPack     -> package.zip (separate archive asset)
 //     .git/config   (ignored)
 //     Unused/       -> empty container, skipped
 write('MyAssets/3d/Props/Furniture/Chair/preview.png', 'fake-png');
@@ -41,14 +116,24 @@ write('MyAssets/3d/Vehicles/Car/preview.webp', 'fake-webp');
 write('MyAssets/2d/GrassTex/preview.jpg', 'fake-jpg');
 write('MyAssets/2d/GrassTex/grass.png', 'fake-png-tex');
 write('MyAssets/2d/Pack/preview.gif', 'fake-gif');
-write('MyAssets/2d/Pack/sheet.unitypackage', 'fake-pkg');
+write('MyAssets/2d/Pack/sheet.unitypackage', unityPackageFile([
+  ['0123456789abcdef/.icon.png', png],
+  ['0123456789abcdef/Models/preview.png', png],
+]));
+write('MyAssets/2d/Pack/extra.unitypackage', unityPackageFile([
+  ['fedcba9876543210/.icon.png', png],
+]));
+write('MyAssets/2d/ZipPack/package.zip', zipFile([
+  ['fedcba9876543210/.icon.png', png],
+  ['fedcba9876543210/Models/preview.png', png],
+]));
 write('MyAssets/.git/config', '[core]');
 
 const LIB_ROOT = path.join(ROOT, 'MyAssets');
 const tagsGetter = () => [];
 const lib = scanLibrary({ id: 'lib1', name: 'MyAssets', path: LIB_ROOT }, { getTags: tagsGetter });
 
-assert.strictEqual(lib.totalAssets, 5, 'total asset count');
+assert.strictEqual(lib.totalAssets, 8, 'total asset count');
 
 // Tree: 2d + 3d top-level containers
 const names = (nodes) => nodes.map((n) => n.name).sort();
@@ -76,8 +161,18 @@ assert.ok(chair.preview && chair.preview.rel === 'preview.png');
 const car = byName('Car');
 assert.strictEqual(car.importable, false, 'Car not importable');
 
-const pack = byName('Pack');
+const pack = byName('sheet');
 assert.strictEqual(pack.kind, 'unitypackage');
+assert.strictEqual(pack.importables.length, 1, 'each unitypackage is a separate importable');
+assert.strictEqual(pack.importables[0].name, 'sheet.unitypackage');
+assert.strictEqual(pack.preview.archive, true, 'unitypackage provides its own preview');
+assert.strictEqual(byName('extra').importables.length, 1, 'second unitypackage is not grouped');
+
+const zipPack = byName('package');
+assert.strictEqual(zipPack.kind, 'zip');
+assert.strictEqual(zipPack.importable, true, 'ZIP package importable');
+assert.deepStrictEqual(zipPack.kinds, ['zip']);
+assert.strictEqual(zipPack.importables.length, 1, 'each ZIP is a separate importable');
 
 // New scanner metadata
 assert.ok(typeof chair.created === 'string' && chair.created.length > 0, 'asset created date present');
@@ -223,8 +318,8 @@ console.log(`scan ok: ${lib.totalAssets} assets, nested depth ok`);
 
   const libData = await (await fetch(`${base}/api/library`)).json();
   const scan = libData.libraries[0];
-  assert.strictEqual(scan.assets.length, 5);
-  assert.strictEqual(scan.assets.filter((a) => a.tags.length === 0).length, 5);
+  assert.strictEqual(scan.assets.length, 8);
+  assert.strictEqual(scan.assets.filter((a) => a.tags.length === 0).length, 8);
 
   const chairLive = scan.assets.find((a) => a.name === 'Chair');
   const prev = await fetch(`${base}/api/preview?path=${encodeURIComponent(chairLive.preview.path)}`);
@@ -233,6 +328,31 @@ console.log(`scan ok: ${lib.totalAssets} assets, nested depth ok`);
   assert.ok(prevEtag && prevEtag.startsWith('W/"'), 'preview carries a weak ETag');
   assert.match(prev.headers.get('cache-control') || '', /private/, 'preview is privately cacheable');
   await prev.arrayBuffer();
+
+  const sheetLive = scan.assets.find((asset) => asset.name === 'sheet');
+  assert.strictEqual(sheetLive.importables.length, 1, 'archive asset queues only its own file');
+  const embedded = await fetch(`${base}/api/preview?path=${encodeURIComponent(sheetLive.preview.path)}`);
+  assert.strictEqual(embedded.status, 200, 'unitypackage icon is served as the thumbnail');
+  assert.deepStrictEqual(
+    Buffer.from(await embedded.arrayBuffer()).subarray(0, 8),
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
+  );
+  const embeddedList = await (await fetch(
+    `${base}/api/archive-previews?path=${encodeURIComponent(sheetLive.preview.path)}`
+  )).json();
+  assert.deepStrictEqual(embeddedList.entries.map((entry) => entry.role), ['preview']);
+  const assetPreview = await fetch(
+    `${base}/api/preview?path=${encodeURIComponent(sheetLive.preview.path)}&entry=${encodeURIComponent(embeddedList.entries[0].entry)}`
+  );
+  assert.strictEqual(assetPreview.status, 200, 'unitypackage asset preview is served');
+
+  const zipLive = scan.assets.find((asset) => asset.name === 'package');
+  const zipThumb = await fetch(`${base}/api/preview?path=${encodeURIComponent(zipLive.preview.path)}`);
+  assert.strictEqual(zipThumb.status, 200, 'ZIP icon is served as the thumbnail');
+  const zipPreviews = await (await fetch(
+    `${base}/api/archive-previews?path=${encodeURIComponent(zipLive.preview.path)}`
+  )).json();
+  assert.strictEqual(zipPreviews.entries.length, 1, 'ZIP preview images are listed');
 
   const revalidate = await fetch(`${base}/api/preview?path=${encodeURIComponent(chairLive.preview.path)}`, {
     headers: { 'If-None-Match': prevEtag },

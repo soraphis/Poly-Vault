@@ -103,7 +103,7 @@ async function waitForDiag(action, filter, what, ms = 15000) {
   assert.ok(byName('Chair'), 'Chair present');
   assert.ok(byName('Treasure'), 'Treasure present');
   assert.ok(byName('GrassTex'), 'GrassTex present');
-  assert.ok(byName('Pack'), 'Pack present');
+  assert.ok(byName('sheet'), 'individual unitypackage asset present');
   assert.strictEqual(byName('Chair').relPath, '3d/Chair');
   assert.strictEqual(byName('GrassTex').relPath, '2d/GrassTex');
   assert.strictEqual(scan.totalAssets, 4);
@@ -198,12 +198,12 @@ async function waitForDiag(action, filter, what, ms = 15000) {
   assert.strictEqual(assetDiag.pathTexts, 0, 'asset footer shows no path text');
   console.log(`asset detail ok: detail=${assetDiag.detail}, view=${assetDiag.view}, metaRows=${assetDiag.metaRows}`);
 
-  // Pack holds the only .unitypackage -> the detail lists just that filename.
+  // Each .unitypackage is its own asset and lists only its own file.
   await waitForDiag('selectLib', (j) => j.view === 'library', 'breadcrumb back to the library view');
   const packDiag = await waitForDiag(
-    'selectCard:Pack',
-    (j) => j.detail === 'Pack' && j.view === 'asset' && j.fileRows >= 1,
-    'Pack detail to list its importable package'
+    'selectCard:sheet',
+    (j) => j.detail === 'sheet' && j.view === 'asset' && j.fileRows >= 1,
+    'unitypackage detail to list its importable file'
   );
   assert.strictEqual(packDiag.importHeading, 'Import files', 'import section is titled "Import files"');
   assert.deepStrictEqual(packDiag.importFiles, ['sheet.unitypackage'], 'only the .unitypackage filename is listed');
